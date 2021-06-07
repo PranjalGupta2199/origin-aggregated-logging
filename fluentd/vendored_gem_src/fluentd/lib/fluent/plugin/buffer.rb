@@ -156,6 +156,10 @@ module Fluent
         @queue_limit_length = nil
         @chunk_limit_records = nil
 
+        @total_bytes_received = 0
+        @total_bytes_stored = 0
+        @outbound_loss = 0
+
         @stage = {}    #=> Hash (metadata -> chunk) : not flushed yet
         @queue = []    #=> Array (chunks)           : already flushed (not written)
         @dequeued = {} #=> Hash (unique_id -> chunk): already written (not purged)
@@ -262,6 +266,12 @@ module Fluent
       # metadata_and_data MUST be a hash of { metadata => data }
       def write(metadata_and_data, format: nil, size: nil, enqueue: false)
         return if metadata_and_data.size < 1
+
+        metadata_and_data.each do |metadata, data|
+          @total_bytes_received += data.size
+          @outbound_loss += data.size
+        end
+
         raise BufferOverflowError, "buffer space has too many data" unless storable?
 
         log.on_trace { log.trace "writing events into buffer", instance: self.object_id, metadata_size: metadata_and_data.size }
@@ -275,6 +285,9 @@ module Fluent
           # sort metadata to get lock of chunks in same order with other threads
           metadata_and_data.keys.sort.each do |metadata|
             data = metadata_and_data[metadata]
+            @total_bytes_stored += data.size
+            @outbound_loss -= data.size
+
             write_once(metadata, data, format: format, size: size) do |chunk, adding_bytesize|
               chunk.mon_enter # add lock to prevent to be committed/rollbacked from other threads
               operated_chunks << chunk
@@ -484,6 +497,9 @@ module Fluent
         synchronize do
           chunk = @dequeued.delete(chunk_id)
           return nil unless chunk # purged by other threads
+
+          @total_bytes_stored -= chunk.size
+          @outbound_loss += chunk.size
 
           metadata = chunk.metadata
           log.on_trace { log.trace "purging a chunk", instance: self.object_id, chunk_id: dump_unique_id_hex(chunk_id), metadata: metadata }
@@ -719,7 +735,10 @@ module Fluent
         'available_buffer_space_ratios',
         'total_queued_size',
         'oldest_timekey',
-        'newest_timekey'
+        'newest_timekey',
+        'total_bytes_received',
+        'total_bytes_stored',
+        'outbound_loss'
       ]
 
       def statistics
@@ -732,6 +751,9 @@ module Fluent
           'queue_byte_size' => queue_size,
           'available_buffer_space_ratios' => buffer_space * 100,
           'total_queued_size' => stage_size + queue_size,
+          'total_bytes_received' => @total_bytes_received,
+          'total_bytes_stored' => @total_bytes_stored,
+          'outbound_loss' => @outbound_loss
         }
 
         if (m = timekeys.min)

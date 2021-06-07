@@ -91,6 +91,17 @@ module Fluent::Plugin
           :fluentd_output_status_buffer_oldest_timekey,
           'Oldest timekey in buffer.'),
 
+        # Metrics to measure outbound loss
+        total_bytes_received: @registry.gauge(
+          :total_bytes_received,
+          'Total number of bytes received from the input plugin.'),
+        total_bytes_stored: @registry.gauge(
+          :total_bytes_stored,
+          'Total number of bytes actually stored in the buffer.'),
+        outbound_loss: @registry.gauge(
+          :outbound_loss,
+          'Outbound loss due to buffer overflow.'),
+
         # Output metrics
         retry_counts: @registry.gauge(
           :fluentd_output_status_retry_count,
@@ -143,6 +154,9 @@ module Fluent::Plugin
         'buffer_available_buffer_space_ratios' => @metrics[:buffer_available_buffer_space_ratios],
         'buffer_newest_timekey' => @metrics[:buffer_newest_timekey],
         'buffer_oldest_timekey' => @metrics[:buffer_oldest_timekey],
+        'buffer_total_bytes_received' => @metrics[:total_bytes_received],
+        'buffer_total_bytes_stored' => @metrics[:total_bytes_stored],
+        'buffer_outbound_loss' => @metrics[:outbound_loss],
 
         # output metrics
         'retry_count' => @metrics[:retry_counts],
