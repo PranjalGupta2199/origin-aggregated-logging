@@ -220,6 +220,15 @@ module Fluent
         # Metrics to measure outbound loss
         @outbound_loss = 0
         @total_bytes_written = 0
+        @total_bytes_received = 0
+      end
+
+      def total_outbound_loss
+        @outbound_loss + (@buffer ? @buffer.buffer_out_loss : 0)
+      end
+
+      def total_bytes_stored
+        @total_bytes_written + (@buffer ? @buffer.queue_size + @buffer.stage_size : 0)
       end
 
       def acts_as_secondary(primary)
@@ -910,15 +919,18 @@ module Fluent
               oldest = @buffer.dequeue_chunk
               if oldest
                 log.warn "dropping oldest chunk to make space after buffer overflow", chunk_id: dump_unique_id_hex(oldest.unique_id)
-                @buffer.purge_chunk(oldest.unique_id)
                 @outbound_loss += oldest.bytesize
+                @buffer.purge_chunk(oldest.unique_id)
               else
                 log.error "no queued chunks to be dropped for drop_oldest_chunk"
               end
             rescue
               # ignore any errors
             end
-            raise unless @buffer.storable?
+            unless @buffer.storable?
+              @outbound_loss += data_bytesize
+              raise
+            end
             retry
           else
             raise "BUG: unknown overflow_action '#{@buffer_config.overflow_action}'"
@@ -962,6 +974,7 @@ module Fluent
             data_bytesize += res.b.bytesize
           end
         end
+        @total_bytes_received += data_bytesize
         write_guard(data_bytesize) do
           @buffer.write(meta_and_data, enqueue: enqueue)
         end
@@ -984,7 +997,7 @@ module Fluent
         meta_and_data.each_pair do |m, d|
           data_bytesize += format_proc.call(d).bytesize
         end
-
+        @total_bytes_received += data_bytesize
         write_guard(data_bytesize) do
           @buffer.write(meta_and_data, format: format_proc, enqueue: enqueue)
         end
@@ -996,10 +1009,11 @@ module Fluent
         format_proc = nil
         meta = metadata((@chunk_key_tag ? tag : nil), nil, nil)
         records = es.size
+        data_bytesize = 0
+
         if @custom_format
           records = 0
           data = []
-          data_bytesize = 0
           es.each(unpacker: Fluent::MessagePackFactory.thread_local_msgpack_unpacker) do |time, record|
             res = format(tag, time, record)
             if res
@@ -1011,7 +1025,9 @@ module Fluent
         else
           format_proc = generate_format_proc
           data = es
+          data_bytesize += format_proc.call(data).bytesize
         end
+        @total_bytes_received += data_bytesize
         write_guard(data_bytesize) do
           @buffer.write({meta => data}, format: format_proc, enqueue: enqueue)
         end
@@ -1506,8 +1522,9 @@ module Fluent
           'rollback_count' => @rollback_count,
           'slow_flush_count' => @slow_flush_count,
           'flush_time_count' => @flush_time_count,
-          'outbound_loss' => @outbound_loss + @buffer.buffer_out_loss,
-          'total_bytes_stored' => @total_bytes_written + @buffer.queue_size + @buffer.stage_size
+          'outbound_loss' => total_outbound_loss,
+          'total_bytes_stored' => total_bytes_stored,
+          'total_bytes_received' => @total_bytes_received
         }
 
         if @buffer && @buffer.respond_to?(:statistics)
