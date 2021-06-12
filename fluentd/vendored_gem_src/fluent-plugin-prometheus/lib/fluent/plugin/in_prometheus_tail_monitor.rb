@@ -52,16 +52,13 @@ module Fluent::Plugin
           :fluentd_tail_file_inode,
           'Current inode of file.'),
         maxfsize: get_gauge(
-          :maxfsize,
+          :fluentd_tail_file_maxfsize,
           'Current max fsize of file on rotation event'),
-        countonrotate: get_gauge(
-          :countonrotate,
-          'No of rotation noticed by fluentd'),
         totalbytesread: get_gauge(
-          :totalbytesread,
+          :fluentd_tail_file_totalbytesread,
           'totalbytes read by fluentd IOHandler'),
         totalbytesavailable: get_gauge(
-          :totalbytesavailable,
+          :fluentd_tail_file_totalbytesavailable,
           'totalbytes available at each instance of rotation - to be read by fluentd IOHandler'),
       }
       timer_execute(:in_prometheus_tail_monitor, @interval, &method(:update_monitor_info))
@@ -87,15 +84,15 @@ module Fluent::Plugin
           totalbytesread = watcher.instance_variable_get(:@totalbytesread)
           totalbytesavailable = watcher.instance_variable_get(:@totalbytesavailable)
           maxfsize = watcher.instance_variable_get(:@maxfsize)
-          countonrotate = watcher.instance_variable_get(:@countonrotate)
+          # countonrotate = watcher.instance_variable_get(:@countonrotate)
           label = labels(info, watcher.path)
           @metrics[:inode].set(label, pe.read_inode)
           @metrics[:position].set(label, pe.read_pos)
           @metrics[:maxfsize].set(label, maxfsize)
-          @metrics[:countonrotate].set(label, countonrotate)
+          # @metrics[:countonrotate].set(label, countonrotate)
           @metrics[:totalbytesread].set(label, totalbytesread)
           @metrics[:totalbytesavailable].set(label, totalbytesavailable)
-          #@log.info "IN PROMETHEUS PLUGIN pr.read_inode and pe.read_pos #{pe.read_inode} #{pe.read_pos} maxfsize #{maxfsize} countonrotate #{countonrotate} totalbytesread #{totalbytesread} totalbytesavailable #{totalbytesavailable} "
+          @log.info "IN PROMETHEUS PLUGIN pr.read_inode and pe.read_pos #{pe.read_inode} #{pe.read_pos} maxfsize #{maxfsize} totalbytesread #{totalbytesread} totalbytesavailable #{totalbytesavailable} "
         end
       end
     end

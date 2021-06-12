@@ -216,6 +216,10 @@ module Fluent
         @timekey_zone = nil
 
         @retry_for_error_chunk = false
+
+        # Metrics to measure outbound loss
+        @outbound_loss = 0
+        @total_bytes_written = 0
       end
 
       def acts_as_secondary(primary)
@@ -875,15 +879,19 @@ module Fluent
         end
       end
 
-      def write_guard(&block)
+      def write_guard(data_bytesize, &block)
         begin
           block.call
         rescue Fluent::Plugin::Buffer::BufferOverflowError
+          puts "[OUT_DEBUG] BufferOverflowError exception raised"
           log.warn "failed to write data into buffer by buffer overflow", action: @buffer_config.overflow_action
           case @buffer_config.overflow_action
           when :throw_exception
+            puts "[OUT_DEBUG] throw_exception mode"
+            @outbound_loss += data_bytesize
             raise
           when :block
+            puts "[OUT_DEBUG] block mode"
             log.debug "buffer.write is now blocking"
             until @buffer.storable?
               if self.stopped?
@@ -897,11 +905,13 @@ module Fluent
             log.debug "retrying buffer.write after blocked operation"
             retry
           when :drop_oldest_chunk
+            puts "[OUT_DEBUG] drop_oldest_chunk mode"
             begin
               oldest = @buffer.dequeue_chunk
               if oldest
                 log.warn "dropping oldest chunk to make space after buffer overflow", chunk_id: dump_unique_id_hex(oldest.unique_id)
                 @buffer.purge_chunk(oldest.unique_id)
+                @outbound_loss += oldest.bytesize
               else
                 log.error "no queued chunks to be dropped for drop_oldest_chunk"
               end
@@ -941,6 +951,7 @@ module Fluent
       def handle_stream_with_custom_format(tag, es, enqueue: false)
         meta_and_data = {}
         records = 0
+        data_bytesize = 0
         es.each(unpacker: Fluent::MessagePackFactory.thread_local_msgpack_unpacker) do |time, record|
           meta = metadata(tag, time, record)
           meta_and_data[meta] ||= []
@@ -948,9 +959,10 @@ module Fluent
           if res
             meta_and_data[meta] << res
             records += 1
+            data_bytesize += res.b.bytesize
           end
         end
-        write_guard do
+        write_guard(data_bytesize) do
           @buffer.write(meta_and_data, enqueue: enqueue)
         end
         @counter_mutex.synchronize{ @emit_records += records }
@@ -961,13 +973,19 @@ module Fluent
         format_proc = generate_format_proc
         meta_and_data = {}
         records = 0
+        data_bytesize = 0
         es.each(unpacker: Fluent::MessagePackFactory.thread_local_msgpack_unpacker) do |time, record|
           meta = metadata(tag, time, record)
           meta_and_data[meta] ||= MultiEventStream.new
           meta_and_data[meta].add(time, record)
           records += 1
         end
-        write_guard do
+
+        meta_and_data.each_pair do |m, d|
+          data_bytesize += format_proc.call(d).bytesize
+        end
+
+        write_guard(data_bytesize) do
           @buffer.write(meta_and_data, format: format_proc, enqueue: enqueue)
         end
         @counter_mutex.synchronize{ @emit_records += records }
@@ -981,18 +999,20 @@ module Fluent
         if @custom_format
           records = 0
           data = []
+          data_bytesize = 0
           es.each(unpacker: Fluent::MessagePackFactory.thread_local_msgpack_unpacker) do |time, record|
             res = format(tag, time, record)
             if res
               data << res
               records += 1
+              data_bytesize += res.b.bytesize
             end
           end
         else
           format_proc = generate_format_proc
           data = es
         end
-        write_guard do
+        write_guard(data_bytesize) do
           @buffer.write({meta => data}, format: format_proc, enqueue: enqueue)
         end
         @counter_mutex.synchronize{ @emit_records += records }
@@ -1007,6 +1027,7 @@ module Fluent
             @dequeued_chunks.delete_if{ |info| info.chunk_id == chunk_id }
           end
         end
+        puts "[OUT_DEBUG] purge_chunk called by commit_write"
         @buffer.purge_chunk(chunk_id)
 
         @retry_mutex.synchronize do
@@ -1114,6 +1135,7 @@ module Fluent
             end
 
             output.try_write(chunk)
+            @total_bytes_written += chunk.bytesize
             check_slow_flush(chunk_write_start)
           else # output plugin without delayed purge
             chunk_id = chunk.unique_id
@@ -1123,6 +1145,7 @@ module Fluent
             log.trace "executing sync write", chunk: dump_chunk_id
 
             output.write(chunk)
+            @total_bytes_written += chunk.bytesize
             check_slow_flush(chunk_write_start)
 
             log.trace "write operation done, committing", chunk: dump_chunk_id
@@ -1237,6 +1260,9 @@ module Fluent
               log.error msg, retry_times: @retry.steps, records: records, error: error
               log.error_backtrace error.backtrace
             end
+
+            @outbound_loss += @buffer.queue_size
+
             @buffer.clear_queue!
             log.debug "buffer queue cleared"
             @retry = nil
@@ -1480,6 +1506,8 @@ module Fluent
           'rollback_count' => @rollback_count,
           'slow_flush_count' => @slow_flush_count,
           'flush_time_count' => @flush_time_count,
+          'outbound_loss' => @outbound_loss + @buffer.buffer_out_loss,
+          'total_bytes_stored' => @total_bytes_written + @buffer.queue_size + @buffer.stage_size
         }
 
         if @buffer && @buffer.respond_to?(:statistics)

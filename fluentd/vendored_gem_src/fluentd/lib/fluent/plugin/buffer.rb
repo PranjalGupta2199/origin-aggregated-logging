@@ -146,7 +146,7 @@ module Fluent
 
       # for tests
       attr_accessor :stage_size, :queue_size
-      attr_reader :stage, :queue, :dequeued, :queued_num
+      attr_reader :stage, :queue, :dequeued, :queued_num, :buffer_out_loss
 
       def initialize
         super
@@ -155,10 +155,6 @@ module Fluent
         @total_limit_size = nil
         @queue_limit_length = nil
         @chunk_limit_records = nil
-
-        @total_bytes_received = 0
-        @total_bytes_stored = 0
-        @outbound_loss = 0
 
         @stage = {}    #=> Hash (metadata -> chunk) : not flushed yet
         @queue = []    #=> Array (chunks)           : already flushed (not written)
@@ -169,6 +165,9 @@ module Fluent
         @stage_size = @queue_size = 0
         @timekeys = Hash.new(0)
         @mutex = Mutex.new
+
+        # Metric for outbound loss
+        @buffer_out_loss = 0
       end
 
       def persistent?
@@ -265,11 +264,10 @@ module Fluent
       # data MUST be Array of serialized events, or EventStream
       # metadata_and_data MUST be a hash of { metadata => data }
       def write(metadata_and_data, format: nil, size: nil, enqueue: false)
-        return if metadata_and_data.size < 1
+        return if metadata_and_data.size < 1                  
 
-        metadata_and_data.each do |metadata, data|
-          @total_bytes_received += data.size
-          @outbound_loss += data.size
+        unless storable?
+          puts "[OUT_DEBUG] Buffer is full. Raising exception"
         end
 
         raise BufferOverflowError, "buffer space has too many data" unless storable?
@@ -285,8 +283,6 @@ module Fluent
           # sort metadata to get lock of chunks in same order with other threads
           metadata_and_data.keys.sort.each do |metadata|
             data = metadata_and_data[metadata]
-            @total_bytes_stored += data.size
-            @outbound_loss -= data.size
 
             write_once(metadata, data, format: format, size: size) do |chunk, adding_bytesize|
               chunk.mon_enter # add lock to prevent to be committed/rollbacked from other threads
@@ -373,6 +369,7 @@ module Fluent
           operated_chunks.each do |chunk|
             chunk.rollback rescue nil # nothing possible to do for #rollback failure
             if chunk.unstaged?
+              @buffer_out_loss += chunk.bytesize
               chunk.purge rescue nil # to prevent leakage of unstaged chunks
             end
             chunk.mon_exit rescue nil # this may raise ThreadError for chunks already committed
@@ -493,13 +490,11 @@ module Fluent
       end
 
       def purge_chunk(chunk_id)
+        puts "[OUT_DEBUG] purge_chunk called"
         metadata = nil
         synchronize do
           chunk = @dequeued.delete(chunk_id)
           return nil unless chunk # purged by other threads
-
-          @total_bytes_stored -= chunk.size
-          @outbound_loss += chunk.size
 
           metadata = chunk.metadata
           log.on_trace { log.trace "purging a chunk", instance: self.object_id, chunk_id: dump_unique_id_hex(chunk_id), metadata: metadata }
@@ -735,10 +730,7 @@ module Fluent
         'available_buffer_space_ratios',
         'total_queued_size',
         'oldest_timekey',
-        'newest_timekey',
-        'total_bytes_received',
-        'total_bytes_stored',
-        'outbound_loss'
+        'newest_timekey'
       ]
 
       def statistics
@@ -750,10 +742,7 @@ module Fluent
           'queue_length' => @queue.size,
           'queue_byte_size' => queue_size,
           'available_buffer_space_ratios' => buffer_space * 100,
-          'total_queued_size' => stage_size + queue_size,
-          'total_bytes_received' => @total_bytes_received,
-          'total_bytes_stored' => @total_bytes_stored,
-          'outbound_loss' => @outbound_loss
+          'total_queued_size' => stage_size + queue_size
         }
 
         if (m = timekeys.min)
