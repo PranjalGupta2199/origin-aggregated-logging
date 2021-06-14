@@ -9,7 +9,7 @@ module Fluent::Plugin
 
     helpers :timer
 
-    config_param :interval, :time, default: 1
+    config_param :interval, :time, default: 5
     attr_reader :registry
 
     MONITOR_IVARS = [
@@ -19,7 +19,11 @@ module Fluent::Plugin
     def initialize
       super
       @registry = ::Prometheus::Client.registry
+      @prev_total_bytes_collected={}
+      # As per k8 regex for container logfile symlink ref :  https://github.com/fabric8io/fluent-plugin-kubernetes_metadata_filter/blob/master/lib/fluent/plugin/filter_kubernetes_metadata.rb#L56
+      @tag_to_kubernetes_filename_regexp_compiled = Regexp.new('var.log.containers.(?<pod_name>[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)_(?<namespace>[^_]+)_(?<container_name>.+)-(?<docker_id>[a-z0-9]{64})\.log$')
     end
+
 
     def multi_workers_ready?
       true
@@ -51,15 +55,9 @@ module Fluent::Plugin
         inode: get_gauge(
           :fluentd_tail_file_inode,
           'Current inode of file.'),
-        maxfsize: get_gauge(
-          :fluentd_tail_file_maxfsize,
-          'Current max fsize of file on rotation event'),
-        totalbytesread: get_gauge(
-          :fluentd_tail_file_totalbytesread,
-          'totalbytes read by fluentd IOHandler'),
-        totalbytesavailable: get_gauge(
-          :fluentd_tail_file_totalbytesavailable,
-          'totalbytes available at each instance of rotation - to be read by fluentd IOHandler'),
+        total_bytes_collected: get_counter(
+          :log_collected_bytes_total,
+          'logs total bytes collected by fluentd.'),
       }
       timer_execute(:in_prometheus_tail_monitor, @interval, &method(:update_monitor_info))
     end
@@ -81,28 +79,49 @@ module Fluent::Plugin
           # Access to internal variable of internal class...
           # Very fragile implementation
           pe = watcher.instance_variable_get(:@pe)
-          totalbytesread = watcher.instance_variable_get(:@totalbytesread)
-          totalbytesavailable = watcher.instance_variable_get(:@totalbytesavailable)
-          maxfsize = watcher.instance_variable_get(:@maxfsize)
-          # countonrotate = watcher.instance_variable_get(:@countonrotate)
+          total_bytes_collected=watcher.instance_variable_get(:@total_bytes_collected)
           label = labels(info, watcher.path)
+          @log.info "label #{label}"
           @metrics[:inode].set(label, pe.read_inode)
           @metrics[:position].set(label, pe.read_pos)
-          @metrics[:maxfsize].set(label, maxfsize)
-          # @metrics[:countonrotate].set(label, countonrotate)
-          @metrics[:totalbytesread].set(label, totalbytesread)
-          @metrics[:totalbytesavailable].set(label, totalbytesavailable)
-          @log.info "IN PROMETHEUS PLUGIN pr.read_inode and pe.read_pos #{pe.read_inode} #{pe.read_pos} maxfsize #{maxfsize} totalbytesread #{totalbytesread} totalbytesavailable #{totalbytesavailable} "
+          if (@prev_total_bytes_collected[label] == nil) 
+            @prev_total_bytes_collected[label]=0
+          end
+          @metrics[:total_bytes_collected].increment(label, total_bytes_collected - @prev_total_bytes_collected[label])
+          @prev_total_bytes_collected[label]=total_bytes_collected
         end
       end
     end
 
     def labels(plugin_info, path)
-      @base_labels.merge(
+      #taking out dirname and .log from the full pathname e.g. /var/log/containers/xxx.log --> xxx
+      #k8 regexp for parsing container generated logfile pathname into namespace, podname, containername
+      path_match_data = path.match(@tag_to_kubernetes_filename_regexp_compiled)
+
+      if path_match_data
+        podname = path_match_data['pod_name'], 
+        namespace = path_match_data['namespace'], 
+        containername = path_match_data['container_name'],
+        dockerid = path_match_data['docker_id']
+      
+        @log.info "path #{path}, namespace #{namespace}, podname #{podname[0]},containername #{containername}"
+
+        @base_labels.merge(
         plugin_id: plugin_info["plugin_id"],
         type: plugin_info["type"],
         path: path,
+        namespace: namespace,
+        podname: podname[0],
+        containername: containername,
       )
+      else 
+        @base_labels.merge(
+        plugin_id: plugin_info["plugin_id"],
+        type: plugin_info["type"],
+        path: path,
+        )
+      end
+
     end
 
     def get_gauge(name, docstring)
@@ -112,5 +131,16 @@ module Fluent::Plugin
         @registry.gauge(name, docstring)
       end
     end
+
+
+    def get_counter(name, docstring)
+      if @registry.exist?(name)
+        @registry.get(name)
+      else
+        @registry.counter(name, docstring)
+      end
+    end
+
+
   end
 end

@@ -21,6 +21,7 @@ require 'fluent/config/error'
 require 'fluent/event'
 require 'fluent/plugin/buffer'
 require 'fluent/plugin/parser_multiline'
+require 'fluent/plugin/fluentd_new_metric_exporter'
 
 if Fluent.windows?
   require_relative 'file_wrapper'
@@ -50,6 +51,7 @@ module Fluent::Plugin
       super
       @paths = []
       @tails = {}
+      @write_watcher = WriteWatcher.new(log)
       @pf_file = nil
       @pf = nil
       @ignore_list = []
@@ -277,7 +279,7 @@ module Fluent::Plugin
 
     def setup_watcher(path, pe)
       line_buffer_timer_flusher = (@multiline_mode && @multiline_flush_interval) ? TailWatcher::LineBufferTimerFlusher.new(log, @multiline_flush_interval, &method(:flush_buffer)) : nil
-      tw = TailWatcher.new(path, @rotate_wait, pe, log, @read_from_head, @enable_watch_timer, @enable_stat_watcher, @read_lines_limit, method(:update_watcher), line_buffer_timer_flusher, @from_encoding, @encoding, open_on_every_update, &method(:receive_lines))
+      tw = TailWatcher.new(path, @rotate_wait, pe, log, @read_from_head, @enable_watch_timer, @enable_stat_watcher, @read_lines_limit, @write_watcher, method(:update_watcher), line_buffer_timer_flusher, @from_encoding, @encoding, open_on_every_update, &method(:receive_lines))
       tw.attach do |watcher|
         event_loop_attach(watcher.timer_trigger) if watcher.timer_trigger
         event_loop_attach(watcher.stat_trigger) if watcher.stat_trigger
@@ -488,7 +490,7 @@ module Fluent::Plugin
     end
 
     class TailWatcher
-      def initialize(path, rotate_wait, pe, log, read_from_head, enable_watch_timer, enable_stat_watcher, read_lines_limit, update_watcher, line_buffer_timer_flusher, from_encoding, encoding, open_on_every_update, &receive_lines)
+      def initialize(path, rotate_wait, pe, log, read_from_head, enable_watch_timer, enable_stat_watcher, read_lines_limit, write_watcher, update_watcher, line_buffer_timer_flusher, from_encoding, encoding, open_on_every_update, &receive_lines)
         @path = path
         @rotate_wait = rotate_wait
         @pe = pe || MemoryPositionEntry.new
@@ -505,18 +507,17 @@ module Fluent::Plugin
         @rotate_handler = RotateHandler.new(self, &method(:on_rotate))
         @io_handler = nil
         @log = log
+        @write_watcher=write_watcher
 
         @line_buffer_timer_flusher = line_buffer_timer_flusher
         @from_encoding = from_encoding
         @encoding = encoding
         @open_on_every_update = open_on_every_update
-        @totalbytesread=0
-        @totalbytesavailable=0
-        @inodelastfsize_map={}
-        @inodereadfsize_map={}
-        @countonrotate=0
-        @maxfsize=0
-        @logloss=0
+
+        #This is now not used to be published from fluentd process as fluentd is found to miss out a few rotations. This will be now be published from Go routine independently from fluentd process. Due to missing on a few inodes during rotation of log files, one can't measure accurately all logged bytes
+        #@total_bytes_logged=0
+
+        @total_bytes_collected=0
       end
 
       attr_reader :path
@@ -526,11 +527,9 @@ module Fluent::Plugin
       attr_accessor :timer_trigger
       attr_accessor :line_buffer, :line_buffer_timer_flusher
       attr_accessor :unwatched  # This is used for removing position entry from PositionFile
-      attr_accessor :totalbytesavailable  # This is used for removing position entry from PositionFile
-      attr_accessor :totalbytesread  # This is used for removing position entry from PositionFile
-      attr_accessor :maxfsize  # This is used for removing position entry from PositionFile
-      attr_accessor :countonrotate  # This is used for removing position entry from PositionFile
-      attr_accessor :logloss  # This is used for removing position entry from PositionFile
+      #This is now not used to be published from fluentd process as fluentd is found to miss out a few rotations. This will be now be published from Go routine independently from fluentd process. Due to missing on a few inodes during rotation of log files, one can't measure accurately all logged bytes
+      #attr_accessor :total_bytes_logged
+      attr_accessor :total_bytes_collected
 
       def tag
         @parsed_tag ||= @path.tr('/', '.').gsub(/\.+/, '.').gsub(/^\./, '')
@@ -547,7 +546,7 @@ module Fluent::Plugin
 
       def detach
         yield self
-        @io_handler.on_notify(@inodereadfsize_map) if @io_handler
+        @io_handler.on_notify if @io_handler
       end
 
       def close
@@ -565,28 +564,17 @@ module Fluent::Plugin
           stat = nil
         end
 
-        @totalbytesavailable=@rotate_handler.on_notify(stat,@inodelastfsize_map) if @rotate_handler
+        @rotate_handler.on_notify(stat) if @rotate_handler
+        @write_watcher.on_notify(@path, stat)
+
+        #The below metric will be now be computed, published by a separate Go application as fluentd is not able to track each and every log rotations. It misses out accounting on all truly logged data bytes
+        #@total_bytes_logged=@write_watcher.update_total_bytes_logged(@path)
         @line_buffer_timer_flusher.on_notify(self) if @line_buffer_timer_flusher
-        @io_handler.on_notify(@inodereadfsize_map) if @io_handler
-
-        @logloss=0
-        if @io_handler && @rotate_handler
-          @totalbytesread=0
-          @countonrotate=0
-          @inodereadfsize_map.each do |k, v|
-            @totalbytesread+=v
-            @countonrotate+=1
-          end
-
-        #@log.info "inodelastfsize_map #{@inodelastfsize_map} inodereadfsize_map #{@inodereadfsize_map}"
-        @logloss=@totalbytesavailable-@totalbytesread
-        #@log.info "totalbytesavailable #{@totalbytesavailable} totalbytesread #{@totalbytesread} logloss #{@logloss} countonrotate #{@countonrotate}"
-        end  
-
+        @io_handler.on_notify if @io_handler
+        @total_bytes_collected=@write_watcher.update_total_bytes_collected(@path)
       end
 
       def on_rotate(stat)
-        @maxfsize=@pe.read_pos
         if @io_handler.nil?
           if stat
             # first time
@@ -616,10 +604,9 @@ module Fluent::Plugin
               pos = @read_from_head ? 0 : fsize
               @pe.update(inode, pos)
             end
-            @io_handler = IOHandler.new(self, &method(:wrap_receive_lines))
+            @io_handler = IOHandler.new(self,@write_watcher, &method(:wrap_receive_lines))
           else
             @io_handler = NullIOHandler.new
-            @totalbytesread=0
           end
         else
           watcher_needs_update = false
@@ -634,7 +621,7 @@ module Fluent::Plugin
             else # file is rotated and new file found
               watcher_needs_update = true
               # Handle the old log file before renewing TailWatcher [fluentd#1055]
-              @io_handler.on_notify(@inodereadfsize_map)
+              @io_handler.on_notify
             end
           else # file is rotated and new file not found
             # Clear RotateHandler to avoid duplicated file watch in same path.
@@ -649,7 +636,7 @@ module Fluent::Plugin
           if watcher_needs_update
             @update_watcher.call(@path, swap_state(@pe))
           else
-            @io_handler = IOHandler.new(self, &method(:wrap_receive_lines))
+            @io_handler = IOHandler.new(self, @write_watcher, &method(:wrap_receive_lines))
           end
         end
       end
@@ -752,8 +739,9 @@ module Fluent::Plugin
       end
 
       class IOHandler
-        def initialize(watcher, &receive_lines)
+        def initialize(watcher, write_watcher, &receive_lines)
           @watcher = watcher
+          @write_watcher=write_watcher
           @receive_lines = receive_lines
           @fifo = FIFO.new(@watcher.from_encoding || Encoding::ASCII_8BIT, @watcher.encoding || Encoding::ASCII_8BIT)
           @iobuf = ''.force_encoding('ASCII-8BIT')
@@ -761,27 +749,24 @@ module Fluent::Plugin
           @io = nil
           @notify_mutex = Mutex.new
           @watcher.log.info "following tail of #{@watcher.path}"
-          @totalbytesread=0
-          @statatopen=nil
+          @bytesread=0
         end
 
-        def on_notify(inodereadfsize_map)
-          @notify_mutex.synchronize { handle_notify(inodereadfsize_map) }
+        def on_notify
+          @notify_mutex.synchronize { handle_notify }
         end
 
-        def handle_notify(inodereadfsize_map)
+        def handle_notify
           with_io do |io|
-          stat = Fluent::FileWrapper.stat(@watcher.path)
-          @statatopen=stat
             begin
               read_more = false
 
               if !io.nil? && @lines.empty?
-                ino=@statatopen.ino
                 begin
                   while true
                     buf = io.readpartial(8192, @iobuf)
-                    @totalbytesread+=buf.bytesize
+                    @bytesread=buf.bytesize
+                    @write_watcher.count_total_bytes_collected(@bytesread,@watcher.path)
                     @fifo << buf
                     @fifo.read_lines(@lines)
                     if @lines.size >= @watcher.read_lines_limit
@@ -792,7 +777,6 @@ module Fluent::Plugin
                   end
                 rescue EOFError
                 end
-                inodereadfsize_map[ino]=@totalbytesread
               end
 
               unless @lines.empty?
@@ -821,7 +805,7 @@ module Fluent::Plugin
         def open
           io = Fluent::FileWrapper.open(@watcher.path)
           io.seek(@watcher.pe.read_pos + @fifo.bytesize)
-          return io
+          io
         rescue RangeError
           io.close if io
           raise WatcherSetupError, "seek error with #{@watcher.path}: file position = #{@watcher.pe.read_pos.to_s(16)}, reading bytesize = #{@fifo.bytesize.to_s(16)}"
@@ -877,10 +861,9 @@ module Fluent::Plugin
           @inode = nil
           @fsize = -1  # first
           @on_rotate = on_rotate
-          @totalbytesavailable=0
         end
 
-        def on_notify(stat,inodelastfsize_map)
+        def on_notify(stat)
           if stat.nil?
             inode = nil
             fsize = 0
@@ -892,18 +875,10 @@ module Fluent::Plugin
           begin
             if @inode != inode || fsize < @fsize
               @on_rotate.call(stat)
-              inodelastfsize_map[@inode]=@fsize
-              @totalbytesavailable=@fsize
             end
             @inode = inode
             @fsize = fsize
-            inodelastfsize_map[inode]=fsize
-            @totalbytesavailable=0
-            inodelastfsize_map.each do | k , v |
-              @totalbytesavailable+=v
-            end
 
-            return @totalbytesavailable
           end
 
         rescue
