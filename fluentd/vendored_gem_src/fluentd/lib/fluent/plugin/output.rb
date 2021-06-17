@@ -221,6 +221,11 @@ module Fluent
         @outbound_loss = 0
         @total_bytes_written = 0
         @total_bytes_received = 0
+        @outbound_loss_lines = 0
+      end
+
+      def total_outbound_loss_lines
+        @outbound_loss_lines + (@buffer ? @buffer.buffer_out_loss_lines : 0)
       end
 
       def total_outbound_loss
@@ -888,7 +893,7 @@ module Fluent
         end
       end
 
-      def write_guard(data_bytesize, &block)
+      def write_guard(data_bytesize, data_loglines, &block)
         begin
           block.call
         rescue Fluent::Plugin::Buffer::BufferOverflowError
@@ -898,6 +903,7 @@ module Fluent
           when :throw_exception
             puts "[OUT_DEBUG] throw_exception mode"
             @outbound_loss += data_bytesize
+            @outbound_loss_lines += data_loglines
             raise
           when :block
             puts "[OUT_DEBUG] block mode"
@@ -920,6 +926,7 @@ module Fluent
               if oldest
                 log.warn "dropping oldest chunk to make space after buffer overflow", chunk_id: dump_unique_id_hex(oldest.unique_id)
                 @outbound_loss += oldest.bytesize
+                @outbound_loss_lines += oldest.size
                 @buffer.purge_chunk(oldest.unique_id)
               else
                 log.error "no queued chunks to be dropped for drop_oldest_chunk"
@@ -929,6 +936,7 @@ module Fluent
             end
             unless @buffer.storable?
               @outbound_loss += data_bytesize
+              @outbound_loss_lines += data_loglines
               raise
             end
             retry
@@ -975,7 +983,7 @@ module Fluent
           end
         end
         @total_bytes_received += data_bytesize
-        write_guard(data_bytesize) do
+        write_guard(data_bytesize, records) do
           @buffer.write(meta_and_data, enqueue: enqueue)
         end
         @counter_mutex.synchronize{ @emit_records += records }
@@ -998,7 +1006,7 @@ module Fluent
           data_bytesize += format_proc.call(d).bytesize
         end
         @total_bytes_received += data_bytesize
-        write_guard(data_bytesize) do
+        write_guard(data_bytesize, records) do
           @buffer.write(meta_and_data, format: format_proc, enqueue: enqueue)
         end
         @counter_mutex.synchronize{ @emit_records += records }
@@ -1028,7 +1036,7 @@ module Fluent
           data_bytesize += format_proc.call(data).bytesize
         end
         @total_bytes_received += data_bytesize
-        write_guard(data_bytesize) do
+        write_guard(data_bytesize, records) do
           @buffer.write({meta => data}, format: format_proc, enqueue: enqueue)
         end
         @counter_mutex.synchronize{ @emit_records += records }
@@ -1278,6 +1286,7 @@ module Fluent
             end
 
             @outbound_loss += @buffer.queue_size
+            @outbound_loss_lines += @buffer.queue_records
 
             @buffer.clear_queue!
             log.debug "buffer queue cleared"
@@ -1523,6 +1532,7 @@ module Fluent
           'slow_flush_count' => @slow_flush_count,
           'flush_time_count' => @flush_time_count,
           'outbound_loss' => total_outbound_loss,
+          'outbound_loss_lines' => total_outbound_loss_lines,
           'total_bytes_stored' => total_bytes_stored,
           'total_bytes_received' => @total_bytes_received
         }
