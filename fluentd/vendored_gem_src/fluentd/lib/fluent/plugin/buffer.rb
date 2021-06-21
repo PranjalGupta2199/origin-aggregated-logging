@@ -146,7 +146,7 @@ module Fluent
 
       # for tests
       attr_accessor :stage_size, :queue_size
-      attr_reader :stage, :queue, :dequeued, :queued_num, :buffer_out_loss
+      attr_reader :stage, :queue, :dequeued, :queued_num, :buffer_out_loss, :queue_records, :buffer_out_loss_lines
 
       def initialize
         super
@@ -168,6 +168,8 @@ module Fluent
 
         # Metric for outbound loss
         @buffer_out_loss = 0
+        @queue_records = 0
+        @buffer_out_loss_lines = 0
       end
 
       def persistent?
@@ -196,6 +198,7 @@ module Fluent
           @queued_num[chunk.metadata] ||= 0
           @queued_num[chunk.metadata] += 1
           @queue_size += chunk.bytesize
+          @queue_records += chunk.size
           if chunk.metadata && chunk.metadata.timekey
             add_timekey(chunk.metadata.timekey)
           end
@@ -222,7 +225,7 @@ module Fluent
       def terminate
         super
         @dequeued = @stage = @queue = @queued_num = nil
-        @stage_size = @queue_size = 0
+        @stage_size = @queue_size = @queue_records = 0
         @timekeys.clear
       end
 
@@ -370,6 +373,7 @@ module Fluent
             chunk.rollback rescue nil # nothing possible to do for #rollback failure
             if chunk.unstaged?
               @buffer_out_loss += chunk.bytesize
+              @buffer_out_loss_lines += chunk.size
               chunk.purge rescue nil # to prevent leakage of unstaged chunks
             end
             chunk.mon_exit rescue nil # this may raise ThreadError for chunks already committed
@@ -415,6 +419,7 @@ module Fluent
             bytesize = chunk.bytesize
             @stage_size -= bytesize
             @queue_size += bytesize
+            @queue_records += chunk.size
           end
         end
         nil
@@ -431,6 +436,7 @@ module Fluent
             chunk.enqueued!
           end
           @queue_size += chunk.bytesize
+          @queue_records += chunk.size
         end
       end
 
@@ -501,8 +507,10 @@ module Fluent
 
           begin
             bytesize = chunk.bytesize
+            records = chunk.size
             chunk.purge
             @queue_size -= bytesize
+            @queue_records -= records
           rescue => e
             log.error "failed to purge buffer chunk", chunk_id: dump_unique_id_hex(chunk_id), error_class: e.class, error: e
             log.error_backtrace
@@ -538,6 +546,7 @@ module Fluent
             end
           end
           @queue_size = 0
+          @queue_records = 0
         end
       end
 
