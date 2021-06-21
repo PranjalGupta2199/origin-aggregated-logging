@@ -222,6 +222,7 @@ module Fluent
         @total_bytes_written = 0
         @total_bytes_received = 0
         @outbound_loss_lines = 0
+        @total_loglines_received = 0
       end
 
       def total_outbound_loss_lines
@@ -983,6 +984,7 @@ module Fluent
           end
         end
         @total_bytes_received += data_bytesize
+        @total_loglines_received += records
         write_guard(data_bytesize, records) do
           @buffer.write(meta_and_data, enqueue: enqueue)
         end
@@ -1006,6 +1008,7 @@ module Fluent
           data_bytesize += format_proc.call(d).bytesize
         end
         @total_bytes_received += data_bytesize
+        @total_loglines_received += records
         write_guard(data_bytesize, records) do
           @buffer.write(meta_and_data, format: format_proc, enqueue: enqueue)
         end
@@ -1036,6 +1039,7 @@ module Fluent
           data_bytesize += format_proc.call(data).bytesize
         end
         @total_bytes_received += data_bytesize
+        @total_loglines_received += records
         write_guard(data_bytesize, records) do
           @buffer.write({meta => data}, format: format_proc, enqueue: enqueue)
         end
@@ -1534,7 +1538,8 @@ module Fluent
           'outbound_loss' => total_outbound_loss,
           'outbound_loss_lines' => total_outbound_loss_lines,
           'total_bytes_stored' => total_bytes_stored,
-          'total_bytes_received' => @total_bytes_received
+          'total_bytes_received' => @total_bytes_received,
+          'total_loglines_received' => @total_loglines_received
         }
 
         if @buffer && @buffer.respond_to?(:statistics)

@@ -104,6 +104,9 @@ module Fluent::Plugin
         outbound_loss_lines: @registry.gauge(
           :fluentd_outbound_loss_lines,
           'Outbound loss lines due to buffer overflow'),
+        total_loglines_received: @registry.gauge(
+          :fluentd_total_loglines_received,
+          'Total number of log lines received from the input plugin.'),
 
         # Output metrics
         retry_counts: @registry.gauge(
@@ -163,6 +166,7 @@ module Fluent::Plugin
         'total_bytes_stored' => @metrics[:total_bytes_stored],
         'outbound_loss' => @metrics[:outbound_loss],
         'outbound_loss_lines' => @metrics[:outbound_loss_lines],
+        'total_loglines_received' => @metrics[:total_loglines_received],
 
         # output metrics
         'retry_count' => @metrics[:retry_counts],
