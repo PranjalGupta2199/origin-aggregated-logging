@@ -58,6 +58,9 @@ module Fluent::Plugin
         total_bytes_collected: get_counter(
           :log_collected_bytes_total,
           'logs total bytes collected by fluentd.'),
+        total_loglines_collected: get_gauge(
+          :log_collected_lines_total,
+          'logs total lines collected by fluentd.'),
       }
       timer_execute(:in_prometheus_tail_monitor, @interval, &method(:update_monitor_info))
     end
@@ -80,10 +83,12 @@ module Fluent::Plugin
           # Very fragile implementation
           pe = watcher.instance_variable_get(:@pe)
           total_bytes_collected=watcher.instance_variable_get(:@total_bytes_collected)
+          total_loglines_collected=watcher.instance_variable_get(:@total_loglines_collected)
           label = labels(info, watcher.path)
           @log.info "label #{label}"
           @metrics[:inode].set(label, pe.read_inode)
           @metrics[:position].set(label, pe.read_pos)
+          @metrics[:total_loglines_collected].set(label, total_loglines_collected)
           if (@prev_total_bytes_collected[label] == nil) 
             @prev_total_bytes_collected[label]=0
           end

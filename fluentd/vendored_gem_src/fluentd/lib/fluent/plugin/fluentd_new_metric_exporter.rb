@@ -30,13 +30,13 @@ module Fluent::Plugin
       # :ino inode number of current file
       # :size of current file
       # :bytes_logged bytes_logged size of previous files for this path
-      Entry = Struct.new(:ino, :size,:sum_bytes_collected,:sum_bytes_logged)
+      Entry = Struct.new(:ino, :size,:sum_bytes_collected,:sum_bytes_logged, :sum_loglines_collected)
 
       def on_notify(path, stat)
         info = @map[path]
         if !info
           #@log.debug "GETTING TOTALBYTES_LOGGED METRICS FOR #{path} new file"
-          info = Entry.new(nil, 0,0,0)
+          info = Entry.new(nil, 0,0,0,0)
         end
         # Accumulate last size if file changed (no stat, new inode or truncated)
         if !stat || info.ino != stat.ino || stat.size < info.size
@@ -66,6 +66,16 @@ module Fluent::Plugin
      def update_total_bytes_collected(path)
        info=@map[path]
        info.sum_bytes_collected
+     end
+
+     def count_total_loglines_collected(linesread,path)
+       info=@map[path]
+       info.sum_loglines_collected += linesread
+     end
+
+     def update_total_loglines_collected(path)
+       info=@map[path]
+       info.sum_loglines_collected
      end
 
     end

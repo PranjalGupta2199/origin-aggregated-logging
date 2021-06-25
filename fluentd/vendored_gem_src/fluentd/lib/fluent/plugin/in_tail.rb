@@ -518,6 +518,7 @@ module Fluent::Plugin
         #@total_bytes_logged=0
 
         @total_bytes_collected=0
+        @total_loglines_collected=0
       end
 
       attr_reader :path
@@ -530,6 +531,7 @@ module Fluent::Plugin
       #This is now not used to be published from fluentd process as fluentd is found to miss out a few rotations. This will be now be published from Go routine independently from fluentd process. Due to missing on a few inodes during rotation of log files, one can't measure accurately all logged bytes
       #attr_accessor :total_bytes_logged
       attr_accessor :total_bytes_collected
+      attr_accessor :total_loglines_collected
 
       def tag
         @parsed_tag ||= @path.tr('/', '.').gsub(/\.+/, '.').gsub(/^\./, '')
@@ -572,6 +574,7 @@ module Fluent::Plugin
         @line_buffer_timer_flusher.on_notify(self) if @line_buffer_timer_flusher
         @io_handler.on_notify if @io_handler
         @total_bytes_collected=@write_watcher.update_total_bytes_collected(@path)
+        @total_loglines_collected=@write_watcher.update_total_loglines_collected(@path)
       end
 
       def on_rotate(stat)
@@ -781,6 +784,7 @@ module Fluent::Plugin
 
               unless @lines.empty?
                 if @receive_lines.call(@lines)
+                  @write_watcher.count_total_loglines_collected(@lines.size,@watcher.path)
                   @watcher.pe.update_pos(io.pos - @fifo.bytesize)
                   @lines.clear
                 else
