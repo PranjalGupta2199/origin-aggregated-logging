@@ -903,8 +903,8 @@ module Fluent
           case @buffer_config.overflow_action
           when :throw_exception
             puts "[OUT_DEBUG] throw_exception mode"
-            @outbound_loss += data_bytesize
-            @outbound_loss_lines += data_loglines
+            # @outbound_loss += data_bytesize
+            # @outbound_loss_lines += data_loglines
             raise
           when :block
             puts "[OUT_DEBUG] block mode"
@@ -936,14 +936,17 @@ module Fluent
               # ignore any errors
             end
             unless @buffer.storable?
-              @outbound_loss += data_bytesize
-              @outbound_loss_lines += data_loglines
+              # @outbound_loss += data_bytesize
+              # @outbound_loss_lines += data_loglines
               raise
             end
             retry
           else
             raise "BUG: unknown overflow_action '#{@buffer_config.overflow_action}'"
           end
+        else      # called only when BufferOverflowError is NOT raised
+            @total_bytes_received += data_bytesize
+            @total_loglines_received += data_loglines
         end
       end
 
@@ -979,12 +982,13 @@ module Fluent
           res = format(tag, time, record)
           if res
             meta_and_data[meta] << res
+            # puts "[TULIP][custom_format] #{res}"
             records += 1
             data_bytesize += res.b.bytesize
           end
         end
-        @total_bytes_received += data_bytesize
-        @total_loglines_received += records
+        # @total_bytes_received += data_bytesize
+        # @total_loglines_received += records
         write_guard(data_bytesize, records) do
           @buffer.write(meta_and_data, enqueue: enqueue)
         end
@@ -1001,14 +1005,15 @@ module Fluent
           meta = metadata(tag, time, record)
           meta_and_data[meta] ||= MultiEventStream.new
           meta_and_data[meta].add(time, record)
+          # puts "[TULIP][standard_format] #{record}"
           records += 1
         end
 
         meta_and_data.each_pair do |m, d|
           data_bytesize += format_proc.call(d).bytesize
         end
-        @total_bytes_received += data_bytesize
-        @total_loglines_received += records
+        # @total_bytes_received += data_bytesize
+        # @total_loglines_received += records
         write_guard(data_bytesize, records) do
           @buffer.write(meta_and_data, format: format_proc, enqueue: enqueue)
         end
@@ -1029,6 +1034,7 @@ module Fluent
             res = format(tag, time, record)
             if res
               data << res
+              # puts "[TULIP][simple] #{res}"
               records += 1
               data_bytesize += res.b.bytesize
             end
@@ -1038,8 +1044,8 @@ module Fluent
           data = es
           data_bytesize += format_proc.call(data).bytesize
         end
-        @total_bytes_received += data_bytesize
-        @total_loglines_received += records
+        # @total_bytes_received += data_bytesize
+        # @total_loglines_received += records
         write_guard(data_bytesize, records) do
           @buffer.write({meta => data}, format: format_proc, enqueue: enqueue)
         end
