@@ -50,8 +50,8 @@ module Fluent::Plugin
     def initialize
       super
       @paths = []
-      @group_watchers = []
-      @group_line_limits = []
+      @group_watchers = []                        # To store the GroupWatcher objects for each group
+      @group_line_limits = []                     # To store the limit of lines for each group
       @tails = {}
       @write_watcher = WriteWatcher.new(log)
       @pf_file = nil
@@ -136,6 +136,7 @@ module Fluent::Plugin
         raise Fluent::ConfigError, "tail: 'path' parameter is required on tail input"
       end
 
+      # Splitting the group_line_limit string to array.
       @group_line_limits = @group_line_limit.split(',').map {|lim| lim.strip }
 
       # TODO: Use plugin_root_dir and storage plugin to store positions if available
@@ -208,6 +209,7 @@ module Fluent::Plugin
         @pf = PositionFile.parse(@pf_file)
       end
 
+      # Initializing GroupWatcher objects
       @paths.each_with_index { |path, idx|
         lim = -1
         if idx < @group_line_limits.size
@@ -238,6 +240,7 @@ module Fluent::Plugin
       close_watcher_handles
     end
 
+    # Returns a list of file names which match the regex `path`
     def expand_paths(path)
       date = Time.now
       paths = []
@@ -282,7 +285,7 @@ module Fluent::Plugin
     # In such case, you should separate log directory and specify two paths in path parameter.
     # e.g. path /path/to/dir/*,/path/to/rotated_logs/target_file
     def refresh_watchers
-
+      # Refresh for each group seperately
       @group_watchers.each{|gw|
         target_paths = expand_paths(gw.group_path)
         existence_paths = gw.current_paths
@@ -511,6 +514,7 @@ module Fluent::Plugin
       es
     end
 
+    # GroupWatcher class to wacth over a group of files.
     class GroupWatcher
       attr_accessor :group_path, :current_paths, :group_line_limit, :number_lines_read, :start_reading_time
       def initialize(path, group_line_limit = -1)
@@ -521,6 +525,7 @@ module Fluent::Plugin
         @start_reading_time = nil
       end
 
+      # Method to check if the group rate limit is reached or not.
       def limit_lines_per_second_reached?
         return false if @group_line_limit < 0 # not enabled by conf
         return false if @number_lines_read < @group_line_limit
@@ -528,9 +533,11 @@ module Fluent::Plugin
         @start_reading_time ||= Fluent::Clock.now
         time_spent_reading = Fluent::Clock.now - @start_reading_time
 
-        if time_spent_reading*@group_line_limit < @number_lines_read
+        if @number_lines_read > time_spent_reading*@group_line_limit
+          # Exceeds limit.
           true
         else
+          # Does not exceed limit.
           @start_reading_time = nil
           @number_lines_read = 0
           false
@@ -549,7 +556,7 @@ module Fluent::Plugin
         @read_lines_limit = read_lines_limit
         @receive_lines = receive_lines
         @update_watcher = update_watcher
-        @group_watcher = gw
+        @group_watcher = gw           # The group watcher this tail watcher belongs to
 
         @stat_trigger = @enable_stat_watcher ? StatWatcher.new(self, &method(:on_notify)) : nil
         @timer_trigger = @enable_watch_timer ? TimerTrigger.new(1, log, &method(:on_notify)) : nil
@@ -831,7 +838,7 @@ module Fluent::Plugin
                     @group_watcher.number_lines_read += @lines.size
 
                     if @group_watcher.limit_lines_per_second_reached?
-                      # Just get out from tailing loop.
+                      # If the rate for this group exceeds the specified limit, get out from tailing loop.
                       read_more = false
                       break
                     end
