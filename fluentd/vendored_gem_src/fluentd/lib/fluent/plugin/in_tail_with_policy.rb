@@ -533,7 +533,7 @@ module Fluent::Plugin
         @start_reading_time ||= Fluent::Clock.now
         time_spent_reading = Fluent::Clock.now - @start_reading_time
 
-        if @number_lines_read > time_spent_reading*@group_line_limit
+        if time_spent_reading < 1
           # Exceeds limit.
           true
         else
