@@ -71,7 +71,7 @@ module Fluent::Plugin
       }
 
       agent_info = @monitor_agent.plugins_info_all(opts).select {|info|
-        info['type'] == 'tail'.freeze
+        info['type'] == 'tail'.freeze || info['type'] == 'tail_with_policy'.freeze
       }
 
       agent_info.each do |info|
