@@ -221,7 +221,7 @@ module Fluent::Plugin
         end
         @group_watchers << GroupWatcher.new(path, lim)
       }
-
+      #puts "GroupWatcher length: #{@group_watchers.size}"
       refresh_watchers unless @skip_refresh_on_startup
       timer_execute(:in_tail_refresh_watchers, @refresh_interval, &method(:refresh_watchers))
     end
@@ -285,6 +285,7 @@ module Fluent::Plugin
     # In such case, you should separate log directory and specify two paths in path parameter.
     # e.g. path /path/to/dir/*,/path/to/rotated_logs/target_file
     def refresh_watchers
+      #puts "Inside refresh_watchers"
       # Refresh for each group seperately
       @group_watchers.each{|gw|
         target_paths = expand_paths(gw.group_path)
@@ -295,16 +296,19 @@ module Fluent::Plugin
         unwatched = existence_paths - target_paths
         added = target_paths - existence_paths
 
+        gw.current_paths = target_paths
+
         stop_watchers(unwatched, immediate: false, unwatched: true) unless unwatched.empty?
         start_watchers(added, gw) unless added.empty?
-
-        gw.current_paths = target_paths
       }
     end
 
     def setup_watcher(path, pe, gw)
+      #puts "Inside setup_watcher"
       line_buffer_timer_flusher = (@multiline_mode && @multiline_flush_interval) ? TailWatcher::LineBufferTimerFlusher.new(log, @multiline_flush_interval, &method(:flush_buffer)) : nil
+      #puts "Calling TailWatcher initialise"
       tw = TailWatcher.new(path, @rotate_wait, pe, log, @read_from_head, @enable_watch_timer, @enable_stat_watcher, @read_lines_limit, @write_watcher, method(:update_watcher), line_buffer_timer_flusher, @from_encoding, @encoding, open_on_every_update, gw, &method(:receive_lines))
+      # #puts "Event Loop Attach for #{gw.current_paths}"
       tw.attach do |watcher|
         event_loop_attach(watcher.timer_trigger) if watcher.timer_trigger
         event_loop_attach(watcher.stat_trigger) if watcher.stat_trigger
@@ -322,6 +326,7 @@ module Fluent::Plugin
     end
 
     def start_watchers(paths, gw)
+      #puts "Inside start_watchers"
       paths.each { |path|
         pe = nil
         if @pf
@@ -527,11 +532,14 @@ module Fluent::Plugin
 
       # Method to check if the group rate limit is reached or not.
       def limit_lines_per_second_reached?
+        puts "[TULIP] #{@current_paths.size}"
         return false if @group_line_limit < 0 # not enabled by conf
-        return false if @number_lines_read < @group_line_limit
+        return false if @number_lines_read <= @group_line_limit/@current_paths.size
 
         @start_reading_time ||= Fluent::Clock.now
         time_spent_reading = Fluent::Clock.now - @start_reading_time
+        puts "[TULIP] Time spent reading: #{@group_path} #{time_spent_reading} #{@current_paths.size}"
+
 
         if time_spent_reading < 1
           # Exceeds limit.
@@ -540,6 +548,7 @@ module Fluent::Plugin
           # Does not exceed limit.
           @start_reading_time = nil
           @number_lines_read = 0
+          # puts "[TULIP] number_lines_read = 0 #{@group_path}"
           false
         end
       end
@@ -623,8 +632,12 @@ module Fluent::Plugin
           stat = nil
         end
 
+        #puts "Calling rotate_handler and write_watcher on_notify"
+        #puts "Io Handler exists ? #{@io_handler}"
+        #puts "Current paths in gw #{@group_watcher.current_paths}"
         @rotate_handler.on_notify(stat) if @rotate_handler
         @write_watcher.on_notify(@path, stat)
+        #puts "Io Handler exists ? #{@io_handler}"
 
         #The below metric will be now be computed, published by a separate Go application as fluentd is not able to track each and every log rotations. It misses out accounting on all truly logged data bytes
         #@total_bytes_logged=@write_watcher.update_total_bytes_logged(@path)
@@ -818,6 +831,7 @@ module Fluent::Plugin
         end
 
         def handle_notify
+          # puts "[TULIP] group_watcher path: #{@group_watcher.group_path} Lines Read: #{@group_watcher.number_lines_read}"
           return if @group_watcher.limit_lines_per_second_reached?
 
           with_io do |io|
@@ -852,6 +866,12 @@ module Fluent::Plugin
                 rescue EOFError
                 end
               end
+
+              if !read_more
+                ## reset counter for files in same group
+                @group_watcher.start_reading_time = nil
+                @group_watcher.number_lines_read = 0
+              end 
 
               unless @lines.empty?
                 if @receive_lines.call(@lines)
